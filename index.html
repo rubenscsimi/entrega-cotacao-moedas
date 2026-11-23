@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Entrega · Carga diária da cotação de moedas</title>
+<style>
+:root { --fundo:#F6F3EC; --tinta:#17191C; --suave:#5F6873; --linha:#DED8C9; --acento:#14456E; --acento-forte:#0E3252; --erro:#A6321F; }
+* { box-sizing: border-box; }
+body { margin:0; min-height:100vh; display:grid; place-items:center; background:var(--fundo); color:var(--tinta); font:15px/1.5 "Segoe UI", system-ui, sans-serif; }
+main { width:min(100% - 32px, 400px); background:#fff; border:1.5px solid var(--linha); border-top:4px solid var(--acento); padding:32px 30px 28px; box-shadow:0 3px 0 rgba(20,69,110,.14); }
+.selo { font:11px/1 Consolas, monospace; letter-spacing:.1em; text-transform:uppercase; color:var(--suave); margin:0 0 14px; }
+h1 { font-size:24px; line-height:1.15; margin:0 0 6px; letter-spacing:-.02em; }
+p.sub { color:var(--suave); margin:0 0 22px; }
+label { display:block; font-size:12.5px; font-weight:600; margin:0 0 5px; }
+input { width:100%; font:inherit; padding:10px 12px; border:1.5px solid var(--linha); margin:0 0 14px; background:#fff; }
+input:focus { outline:2px solid var(--acento); outline-offset:1px; border-color:var(--acento); }
+button { width:100%; font:600 14px/1 inherit; font-family:inherit; padding:13px; background:var(--acento); color:#fff; border:0; cursor:pointer; }
+button:hover { background:var(--acento-forte); }
+button[disabled] { opacity:.7; cursor:progress; }
+.msg { min-height:20px; margin:12px 0 0; font-size:13px; color:var(--erro); }
+</style>
+</head>
+<body>
+<main>
+  <p class="selo">Acesso restrito</p>
+  <h1>Entrega · Carga diária da cotação de moedas</h1>
+  <p class="sub">Informe o usuário e a senha recebidos.</p>
+  <form id="entrar" autocomplete="on">
+    <label for="usuario">Usuário</label>
+    <input id="usuario" name="username" autocomplete="username" required>
+    <label for="senha">Senha</label>
+    <input id="senha" name="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Entrar</button>
+    <p class="msg" role="alert"></p>
+  </form>
+</main>
+<script>
+const CFG = {"sal": "HGWJ9aTn1JAVJDUSe61sZg==", "iteracoes": 600000, "mapa": "94ea4add22d1e3782adde65c"};
+const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const CHAVE_ABA = "cofre:" + CFG.sal;
+
+async function deriva(usuario, senha) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(usuario.trim().toLowerCase() + "\n" + senha), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", hash: "SHA-256", salt: b64(CFG.sal), iterations: CFG.iteracoes },
+    base, { name: "AES-GCM", length: 256 }, true, ["decrypt"]);
+}
+
+async function decifra(chave, buf) {
+  return crypto.subtle.decrypt({ name: "AES-GCM", iv: buf.slice(0, 12) }, chave, buf.slice(12));
+}
+
+async function baixaBlob(id, aoReceber) {
+  const r = await fetch("d/" + id + ".bin", { cache: "no-cache" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  const leitor = r.body.getReader(), partes = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await leitor.read();
+    if (done) break;
+    partes.push(value); total += value.length;
+    if (aoReceber) aoReceber(value.length);
+  }
+  const tudo = new Uint8Array(total);
+  let p = 0;
+  for (const v of partes) { tudo.set(v, p); p += v.length; }
+  return tudo.buffer;
+}
+
+async function abreCofre(chave) {
+  const mapa = JSON.parse(new TextDecoder().decode(await decifra(chave, await baixaBlob(CFG.mapa))));
+  const cache = new Map();
+  const COFRE = {
+    mapa,
+    async abre(caminho, aoReceber) {
+      const item = mapa[caminho];
+      if (!item) throw new Error("fora do cofre: " + caminho);
+      if (cache.has(caminho)) { if (aoReceber) aoReceber(item.tam); return cache.get(caminho); }
+      const blob = new Blob([await decifra(chave, await baixaBlob(item.id, aoReceber))], { type: item.tipo });
+      if (item.tam < 20 * 1024 * 1024) cache.set(caminho, blob);
+      return blob;
+    },
+    sair() { sessionStorage.removeItem(CHAVE_ABA); location.reload(); }
+  };
+  window.COFRE = COFRE;
+  const pagina = new TextDecoder().decode(await decifra(chave, await baixaBlob(mapa["index.html"].id)));
+  document.open();
+  document.write(pagina.replace(/<head([^>]*)>/i, "<head$1><script>(" + carregador.toString() + ")();<\/script>"));
+  document.close();
+}
+
+function carregador() {
+  const pronto = async () => {
+    const C = window.COFRE;
+    const url = async (c, n) => URL.createObjectURL(await C.abre(c, n));
+    for (const el of document.querySelectorAll("img[data-cofre-src]")) url(el.dataset.cofreSrc).then(u => (el.src = u));
+    for (const el of document.querySelectorAll("[data-cofre-href]")) {
+      el.addEventListener("click", async ev => {
+        ev.preventDefault();
+        const janela = window.open("", "_blank");
+        const u = await url(el.dataset.cofreHref);
+        if (janela) janela.location = u; else location.href = u;
+      });
+    }
+    for (const el of document.querySelectorAll("video[data-cofre-src]")) {
+      if (el.dataset.cofrePoster) url(el.dataset.cofrePoster).then(u => (el.poster = u));
+      const caminho = el.dataset.cofreSrc, tam = (C.mapa[caminho] || {}).tam || 1;
+      const aviso = document.createElement("div");
+      aviso.style.cssText = "position:absolute;inset:auto 0 0 0;padding:10px 14px;background:rgba(0,0,0,.72);color:#fff;font:13px Consolas,monospace;z-index:2";
+      (el.parentElement || document.body).appendChild(aviso);
+      let rec = 0;
+      aviso.textContent = "Carregando o vídeo… 0%";
+      C.abre(caminho, n => { rec += n; aviso.textContent = "Carregando o vídeo… " + Math.min(99, Math.floor(rec * 100 / tam)) + "%"; })
+        .then(b => { el.src = URL.createObjectURL(b); aviso.remove(); el.dispatchEvent(new Event("cofre-pronto")); })
+        .catch(() => (aviso.textContent = "Não foi possível carregar o vídeo. Recarregue a página."));
+    }
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", pronto); else pronto();
+}
+
+const form = document.getElementById("entrar"), msg = form.querySelector(".msg"), botao = form.querySelector("button");
+form.addEventListener("submit", async ev => {
+  ev.preventDefault();
+  botao.disabled = true; msg.textContent = ""; botao.textContent = "Abrindo…";
+  try {
+    const chave = await deriva(form.usuario.value, form.senha.value);
+    await abreCofre(chave).catch(e => { throw e; });
+    try { sessionStorage.setItem(CHAVE_ABA, JSON.stringify(await crypto.subtle.exportKey("jwk", chave))); } catch (e) {}
+  } catch (e) {
+    msg.textContent = "Usuário ou senha inválidos.";
+    botao.disabled = false; botao.textContent = "Entrar";
+  }
+});
+
+(async () => {
+  const salva = sessionStorage.getItem(CHAVE_ABA);
+  if (!salva) return;
+  try {
+    const chave = await crypto.subtle.importKey("jwk", JSON.parse(salva), { name: "AES-GCM" }, true, ["decrypt"]);
+    await abreCofre(chave);
+  } catch (e) { sessionStorage.removeItem(CHAVE_ABA); }
+})();
+</script>
+</body>
+</html>
